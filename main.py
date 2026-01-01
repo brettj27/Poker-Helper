@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from math import cos, sin, pi
 import random
 
-# ---------- Data model ----------
+# -=x=- Player Model -=x=-
 @dataclass
 class Player:
     name: str
@@ -11,8 +11,14 @@ class Player:
     bet: int = 0
     in_hand: bool = True
     cards_hidden: bool = True  # hole cards not shown
+    cards: tuple[str, str] = ("??", "??")
 
-# ---------- UI ----------
+# -=x=- Game Logic -=x=-
+class PokerGame():
+    def __init__(self, n_seats):
+        pass
+
+# -=x=- UI -=x=-
 class PokerTableUI(tk.Tk):
     def __init__(self, n_seats=8):
         super().__init__()
@@ -46,20 +52,42 @@ class PokerTableUI(tk.Tk):
 
         self.redraw()
 
-    def setPot(value):
+    def setPot(self, value):
         self.pot = value
 
-    def setFlop(cards):
+    def setPlayerBet(self, player_idx, bet):
+        if player_idx not in range(n_seats):
+            print("Error setting player bet")
+            return
+
+        player = self.players[player_idx]
+
+        if bet < 0 or bet > player.stack:
+            print("Error setting player bet")
+            return
+
+        player.bet = bet
+
+    def setPlayerCards(self, player_idx, cards):
+        if player_idx not in range(n_seats) or len(cards) != 2:
+            print("Error setting player cards")
+            return
+
+        player = self.players[player_idx]
+        player.cards = tuple(cards)
+
+    def setFlop(self, cards):
         if len(cards) != 3:
+            print("Error setting flop")
             return
         else:
             for idx, card in enumerate(cards):
                 self.community[idx] = card
 
-    def setTurn(card):
+    def setTurn(self, card):
         self.community[3] = card
 
-    def setRiver(card):
+    def setRiver(self, card):
         self.community[4] = card
 
     # -=x=- Helper Functions for UI -=x=-
