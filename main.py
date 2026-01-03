@@ -1,11 +1,28 @@
 import tkinter as tk
+from tkinter import simpledialog
 from dataclasses import dataclass
 from math import cos, sin, pi
+from typing import Optional
 import random
 
-# -=x=- Player Model -=x=-
+# -=x=- Player Classes -=x=- (We sync them up when we need the UI to update states)
+
+# This is the class for the game logic 
+
 @dataclass
-class Player:
+class GamePlayer:
+    name: str
+    stack: int
+    bet: int = 0
+    made_decision_this_round: bool = False
+    in_hand: bool = True
+    cards_hidden: bool = True  # hole cards not shown
+    cards: tuple[str, str] = ("??", "??")
+
+# This is the class for the UI
+
+@dataclass
+class UIPlayer:
     name: str
     stack: int
     bet: int = 0
@@ -13,22 +30,259 @@ class Player:
     cards_hidden: bool = True  # hole cards not shown
     cards: tuple[str, str] = ("??", "??")
 
-# -=x=- Game Logic -=x=-
-class PokerGame():
-    def __init__(self, n_seats):
-        pass
+RANKS = "23456789TJQKA"
+SUITS = "cdhs"  # clubs, diamonds, hearts, spades
+
+def card_to_str(card_id: int) -> str:
+    """
+    This function computes our assigned card IDs (0-51) to a tuple representing the card such as ('A', 'h'), which is the ace of hearts
+    INPUTS:
+        - card_id is the card ID value (an integer between [0, 51])
+    OUTPUTS:
+        - a tuple such as ('A', 'h') representing the card
+    """
+    rank = RANKS[card_id % 13]
+    suit = SUITS[card_id // 13]
+    return f"{rank}{suit}"  # like "Ah", "7d", etc
+
+class PokerHand:
+    def __init__(self, players: list[GamePlayer], button_pos: int, big_blind: int):
+
+        self.players = players
+        self.n_seats = len(players)
+
+        # Assigns blinds based on button position
+        self.button_pos = button_pos
+        self.bb_amount = big_blind
+        self.sb_amount = big_blind // 2
+
+        self.sb_pos = (self.button_pos + 1) % self.n_seats
+        self.bb_pos = (self.button_pos + 2) % self.n_seats
+        self.current_player_idx = (self.bb_pos + 1) % self.n_seats
+
+        self.players[self.button_pos].name = f"Seat {self.button_pos + 1} (Button)"
+        self.players[self.sb_pos].name = f"Seat {self.sb_pos + 1} (SB)"
+        self.players[self.bb_pos].name = f"Seat {self.bb_pos + 1} (BB)"
+
+        self.pot = 0
+        self.board: list[str] = []  # will grow to 5
+
+        # Fresh, shuffled deck for this hand
+        self.deck = list(range(52))
+        random.shuffle(self.deck)
+
+        self.reset_players_for_hand()
+        self.post_blinds()
+        self.current_bet = big_blind
+        self.deal_cards()
+
+    def apply_action(self, seat_idx: int, action: str, raise_to: int | None = None):
+        p = self.players[seat_idx]
+        if not p.in_hand:
+            return
+
+        action = action.lower()
+
+        if action == "fold":
+            p.in_hand = False
+            p.made_decision_this_round = True
+
+        elif action == "check":
+            # check if already matched, otherwise it's a call
+            needed = max(0, self.current_bet - p.bet)
+            pay = min(needed, p.stack)
+            p.stack -= pay
+            p.bet += pay
+            p.made_decision_this_round = True
+
+        elif action == "raise":
+            if raise_to is None:
+                return
+            raise_to = max(raise_to, self.current_bet)
+            needed = max(0, raise_to - p.bet)
+            pay = min(needed, p.stack)
+            p.stack -= pay
+            p.bet += pay
+
+            if p.bet > self.current_bet:
+                self.current_bet = p.bet
+                for other in self.players:
+                    if other.in_hand and other is not p:
+                        other.made_decision_this_round = False
+
+            p.made_decision_this_round = True
+
+
+    def run_betting_round(self):
+        while True:
+            idx = next_player_to_act(
+                self.players,
+                self.current_player_idx,
+                self.current_bet
+            )
+
+            if idx is None:
+                break  # betting round complete
+
+            self.current_player_idx = idx
+            player = self.players[idx]
+
+            self.prompt_player_action(player)
+
+    def next_player_to_act(self, players, start_idx, current_bet):
+        n = len(players)
+        for i in range(n):
+            idx = (start_idx + i) % n
+            p = players[idx]
+            if needs_action(p, current_bet):
+                return idx
+        return None  # betting round complete
+
+    def needs_action(self, player: GamePlayer, current_bet: int) -> bool:
+        # Returns T or F whether a player needs to act or not
+        return (
+            player.in_hand
+            and (not player.made_decision_this_round or player.bet < current_bet)
+        )
+
+    def reset_players_for_hand(self):
+        """
+        This function resets player's bet, hand activity state, and cards to prepare for a new hand
+        INPUTS:
+            - none
+        OUTPUTS:
+            - none
+        """
+        for p in self.players:
+            p.bet = 0
+            p.in_hand = True
+            p.cards = ("??", "??")
+
+    def post_blinds(self):
+        """
+        This function pushes the blind bets
+        INPUTS:
+            - none
+        OUTPUTS:
+            - none
+        """
+        sb_p = self.players[self.sb_pos]
+        bb_p = self.players[self.bb_pos]
+
+        sb = min(self.sb_amount, sb_p.stack)
+        bb = min(self.bb_amount, bb_p.stack)
+
+        sb_p.stack -= sb
+        bb_p.stack -= bb
+
+        sb_p.bet += sb
+        bb_p.bet += bb
+
+        self.pot += sb + bb
+
+    def deal_cards(self):
+        """
+        This function deals random cards to each player
+        INPUTS:
+            - none
+        OUTPUTS:
+            - none
+        """
+        for i in range(self.n_seats):
+            c1 = card_to_str(self.deck.pop())
+            c2 = card_to_str(self.deck.pop())
+            self.players[i].cards = (c1, c2)
+
+    def deal_flop(self):
+        """
+        This function deals the flop
+        INPUTS:
+            - none
+        OUTPUTS:
+            - none
+        """
+        # optional burn: self.deck.pop()
+        self.board = [card_to_str(self.deck.pop()) for _ in range(3)]
+
+    def deal_turn(self):
+        """
+        This function deals the turn
+        INPUTS:
+            - none
+        OUTPUTS:
+            - none
+        """
+        # optional burn: self.deck.pop()
+        self.board.append(card_to_str(self.deck.pop()))
+
+    def deal_river(self):
+        """
+        This function deals the river
+        INPUTS:
+            - none
+        OUTPUTS:
+            - none
+        """
+        # optional burn: self.deck.pop()
+        self.board.append(card_to_str(self.deck.pop()))
+
+
+class PokerGame:
+    def __init__(self, n_seats: int, big_blind_amount: int):
+        self.n_seats = n_seats
+        self.big_blind_amount = big_blind_amount
+
+        self.players = [GamePlayer(name="Seat 1 (Me)", stack=1500)]
+        self.players += [GamePlayer(name=f"Seat {i+1}", stack=1500) for i in range(1, n_seats)]
+
+        self.hand_number = 0
+
+        # Randomly assigns button
+        self.button_pos = random.randrange(n_seats)
+        #self.current_player_idx = self.button_pos
+
+        self.hand: Optional[PokerHand] = None
+
+    def start_hand(self):
+        """
+        This function starts the hand by creating a new hand object, and updating the hand tracking variable
+        INPUTS:
+            - none
+        OUTPUTS:
+            - none
+        """
+        self.hand = PokerHand(self.players, self.button_pos, self.big_blind_amount)
+        self.hand_number += 1
+
+    def end_hand(self):
+        """
+        This function ends the hand, and updates the button position
+        INPUTS:
+            - none
+        OUTPUTS:
+            - none
+        """
+        # rotate button for next hand
+        self.button_pos = (self.button_pos + 1) % self.n_seats
+        self.hand = None
 
 # -=x=- UI -=x=-
-class PokerTableUI(tk.Tk):
+class PokerGameUI(tk.Tk):
     def __init__(self, n_seats=8):
         super().__init__()
-        self.title("Poker Table")
+        self.title("Poker Simulation")
         self.geometry("1000x650")
 
+        self.game_running = False
+        self.paused = False
+
         self.n_seats = n_seats
-        self.players = [Player(name=f"Me (Seat 1)", stack=1500, bet=0, in_hand=True, cards_hidden=False)]
+
+        self.game = PokerGame(n_seats=self.n_seats, big_blind_amount=50)
+
+        self.players = [UIPlayer(name=f"Me (Seat 1)", stack=1500, bet=0, in_hand=True, cards_hidden=False)]
         self.players += [
-            Player(name=f"Seat {i+1}", stack=1500, bet=0, in_hand=True, cards_hidden=True)
+            UIPlayer(name=f"Seat {i+1}", stack=1500, bet=0, in_hand=True, cards_hidden=True)
             for i in range(1, n_seats)
         ]
 
@@ -46,49 +300,47 @@ class PokerTableUI(tk.Tk):
         bar = tk.Frame(self, bg="#111")
         bar.place(relx=0.5, rely=0.98, anchor="s")
 
-        tk.Button(bar, text="Pause Game", command=self.pause_game).pack(side="left", padx=6)
-        tk.Button(bar, text="Deal (Hidden)", command=self.demo_deal_hidden).pack(side="left", padx=6)
-        tk.Button(bar, text="Clear Bets", command=self.demo_clear_bets).pack(side="left", padx=6)
+        self.start_pause_btn = tk.Button(
+            bar,
+            text="Start Game",
+            command=self.toggle_game
+        )
+        self.start_pause_btn.pack(side="left", padx=6)
+        tk.Button(bar, text="Raise", command=self.ui_raise).pack(side="right", padx=6)
+        tk.Button(bar, text="Check", command=self.ui_check).pack(side="right", padx=6)
+        tk.Button(bar, text="Fold", command=self.ui_fold).pack(side="right", padx=6)
 
         self.redraw()
 
-    def setPot(self, value):
-        self.pot = value
-
-    def setPlayerBet(self, player_idx, bet):
-        if player_idx not in range(n_seats):
-            print("Error setting player bet")
+    def sync_from_game(self):
+        """
+        This function syncs the player data between the UIPlayer objects and GamePlayer objects
+        INPUTS:
+            - none
+        OUTPUTS:
+            - none
+        """
+        hand = self.game.hand
+        if hand is None:
             return
 
-        player = self.players[player_idx]
+        self.pot = hand.pot
+        self.community = (hand.board + ["??"] * 5)[:5]
 
-        if bet < 0 or bet > player.stack:
-            print("Error setting player bet")
-            return
+        for i in range(self.n_seats):
+            gp = self.game.players[i]
+            up = self.players[i]
 
-        player.bet = bet
+            up.stack = gp.stack
+            up.bet = gp.bet
+            up.in_hand = gp.in_hand
+            up.cards = gp.cards
+            up.name = gp.name
 
-    def setPlayerCards(self, player_idx, cards):
-        if player_idx not in range(n_seats) or len(cards) != 2:
-            print("Error setting player cards")
-            return
+            # Only you see your cards
+            up.cards_hidden = (i != 0)
 
-        player = self.players[player_idx]
-        player.cards = tuple(cards)
-
-    def setFlop(self, cards):
-        if len(cards) != 3:
-            print("Error setting flop")
-            return
-        else:
-            for idx, card in enumerate(cards):
-                self.community[idx] = card
-
-    def setTurn(self, card):
-        self.community[3] = card
-
-    def setRiver(self, card):
-        self.community[4] = card
+        self.redraw()
 
     # -=x=- Helper Functions for UI -=x=-
     def seat_positions(self, cx, cy, rx, ry):
@@ -179,25 +431,77 @@ class PokerTableUI(tk.Tk):
                         fill="#0b2a6f" if p.cards_hidden else "#ffffff",
                         outline="#222"
                     )
-                    c.create_text(x, cards_y, text="🂠" if p.cards_hidden else "??",
+                    card_text = "🂠" if p.cards_hidden else p.cards[k]
+                    c.create_text(x, cards_y, text=card_text,
                                   fill="white" if p.cards_hidden else "black",
                                   font=("Helvetica", 12))
 
-    # -=x=- Button Actions -=x=-
+    # -=x=- Button Functionality -=x=-
+    def toggle_game(self):
+        # This is the function for the Start / Pause / Resume button
+        if not self.game_running and not self.paused:
+            self.start_game()
+        elif self.paused:
+            self.resume_game()
+        else:
+            self.pause_game()
+
+    def ui_raise(self):
+        if self.game.hand is None:
+            return
+        hand = self.game.hand
+        current_player_idx = hand.current_player_idx
+
+        raise_to = simpledialog.askinteger(
+            "Raise",
+            f"Raise to what total bet? (current bet = {hand.current_bet})",
+            minvalue=hand.current_bet
+        )
+        if raise_to is None:
+            return
+
+        hand.apply_action(current_player_idx, "raise", raise_to=raise_to)
+        hand.current_player_idx = (current_player_idx + 1) % self.n_seats
+        self.sync_from_game()
+
+    def ui_check(self):
+        if self.game.hand is None:
+            return
+        current_player_idx = self.game.hand.current_player_idx
+        self.game.hand.apply_action(current_player_idx, "check")
+        self.game.hand.current_player_idx = (current_player_idx + 1) % self.n_seats
+        self.sync_from_game()
+
+    def ui_fold(self):
+        if self.game.hand is None:
+            return
+        current_player_idx = self.game.hand.current_player_idx
+        self.game.hand.apply_action(current_player_idx, "fold")
+        self.game.hand.current_player_idx = (current_player_idx + 1) % self.n_seats
+        self.sync_from_game()
+
+
+    # Start / Resume / Pause Game Functionality
+
+    def start_game(self):
+        # This is called when the Start Game button is pressed
+        self.game_running = True # Used so the start game button isn't shown again
+        self.start_pause_btn.config(text="Pause Game")
+
+        self.game.start_hand()
+        self.sync_from_game()
+
     def pause_game(self):
-        pass
+        # This is called when the Pause Game button is pressed
+        self.game_running = False
+        self.paused = True # Used so the Resume Button is shown next time
+        self.start_pause_btn.config(text="Resume Game")
 
-    def demo_deal_hidden(self):
-        for p in self.players:
-            p.in_hand = True
-        self.community = ["??"] * 5
-        self.redraw()
-
-    def demo_clear_bets(self):
-        for p in self.players:
-            p.bet = 0
-        self.pot = 0
-        self.redraw()
+    def resume_game(self):
+        # This is called when the Resume Game button is pressed
+        self.game_running = True
+        self.paused = False
+        self.start_pause_btn.config(text="Pause Game")
 
 
-PokerTableUI(n_seats=8).mainloop()
+PokerGameUI(n_seats=8).mainloop()
