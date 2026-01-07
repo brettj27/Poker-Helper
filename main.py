@@ -3,6 +3,7 @@ from tkinter import simpledialog
 from dataclasses import dataclass
 from math import cos, sin, pi
 from typing import Optional
+from collections import defaultdict
 import random
 
 # -=x=- Player Classes -=x=- (We sync them up when we need the UI to update states)
@@ -18,6 +19,7 @@ class GamePlayer:
     in_hand: bool = True
     cards_hidden: bool = True  # hole cards not shown
     cards: tuple[str, str] = ("??", "??")
+    last_action: Optional[str] = None # "check", "call", "raise", "fold"
 
 # This is the class for the UI
 
@@ -29,21 +31,166 @@ class UIPlayer:
     in_hand: bool = True
     cards_hidden: bool = True  # hole cards not shown
     cards: tuple[str, str] = ("??", "??")
+    last_action: Optional[str] = None # "check", "call", "raise", "fold"
 
 RANKS = "23456789TJQKA"
 SUITS = "cdhs"  # clubs, diamonds, hearts, spades
 
 def card_to_str(card_id: int) -> str:
     """
-    This function computes our assigned card IDs (0-51) to a tuple representing the card such as ('A', 'h'), which is the ace of hearts
+    This function computes our assigned card IDs (0-51) to a string representing the card such as "Ah", which is the ace of hearts
     INPUTS:
         - card_id is the card ID value (an integer between [0, 51])
     OUTPUTS:
-        - a tuple such as ('A', 'h') representing the card
+        - a string such as "Ah" representing the card
     """
     rank = RANKS[card_id % 13]
     suit = SUITS[card_id // 13]
     return f"{rank}{suit}"  # like "Ah", "7d", etc
+
+def parse_cards(cards: list[str]) -> list[tuple[int,str]]:
+        """
+        This function parses a list of string representations of cards such as ["Ah", "Kh", "Jh"]
+        to a sortable tuple in order to compute hand types (Two pair, etc)
+        EX: "Ah" -> (14, "h")
+        INPUTS:
+            cards is a list of strings which are of the form "{RANK}{SUIT}"
+        OUTPUTS:
+            returns a list of tuples of the form (RANK IDX, "{SUIT}")
+        """
+        new_list = []
+        for card in cards:
+            rank = RANKS.index(card[0]) + 2
+            suit = card[1]
+            new_list.append((rank, suit))
+        return new_list
+
+def score_five(cards: list[tuple[int,str]]) -> tuple[int, tuple]:
+    """
+    This function scores a five-card hand of Texas Hold'em by returning
+    a tuple representing the hand of the form (Type, Kickers)
+    EX: Two pair with 9s and 8s with an Ace kicker -> (2, (9, 8, 14))
+    Because 2 is the ID of two-pair, and 9, 8, 14 are the card ranks
+
+    0: high card
+    1: one pair
+    2: two pair
+    3: three of a kind
+    4: straight
+    5: flush
+    6: full house
+    7: four of a kind
+    8: straight flush
+    9: royal flush
+
+    INPUTS:
+        - a list of tuples of the form (RANK IDX, "{SUIT}")
+    """
+
+    if len(cards) != 5:
+        return
+    ranks = sorted((r for r, _ in cards), reverse=True)
+    suits = [s for _, s in cards]
+    flush = len(set(suits)) == 1
+    straight = straight_high(ranks) # None if no straight exists
+    four_o_a_k = four_of_a_kind(get_pairs(ranks))
+    full_h = full_house(get_pairs(ranks))
+    three_o_a_k = three_of_a_kind(get_pairs(ranks))
+    two_p = two_pair(get_pairs(ranks))
+    one_p = one_pair(get_pairs(ranks))
+
+    if straight == 14 and flush == True:
+        return (9, ())
+    elif straight != None and flush == True:
+        return (8, (straight))
+    elif four_o_a_k != None:
+        rank_and_kickers = [four_o_a_k] + [rank for rank in ranks if rank != four_o_a_k]
+        return (7, tuple(rank_and_kickers))
+    elif full_h != None:
+        return (6, (full_h[0], full_h[1]))
+    elif flush == True:
+        return (5, (ranks))
+    elif straight != None:
+        return (4, straight)
+    elif three_o_a_k != None:
+        ranks_and_kickers = [three_o_a_k] + [rank for rank in ranks if rank != three_o_a_k]
+        return (3, tuple(ranks_and_kickers))
+    elif two_p != None:
+        ranks_and_kickers = [two_p] + [rank for rank in ranks if rank not in two_p]
+        return (2, tuple(ranks_and_kickers))
+    elif one_p != None:
+        ranks_and_kickers = [one_p] + [rank for rank in ranks if rank != one_p]
+        return (1, tuple(ranks_and_kickers))
+    else:
+        return (0, tuple(ranks))
+    return ranks, suits
+
+def straight_high(ranks: list[int]) -> int | None:
+    """
+    Returns the top rank of the straight if one exists,
+    otherwise None
+    """
+    ranks = sorted(set(ranks), reverse=True)
+
+    if len(ranks) != 5:
+        return None
+    
+    # Normal straight
+    if ranks[0] - ranks[4] == 4:
+        return ranks[0]
+
+    # Handle A, 5, 4, 3, 2
+    if ranks == [14, 5, 4, 3, 2]:
+        return 5
+
+    return None
+
+def four_of_a_kind(rank_counts: tuple[int]) -> int | None:
+    if len(rank_counts) != 1:
+        return None
+    if rank_counts[0][1] == 4:
+        return rank_counts[0][0]
+    return None
+
+def full_house(rank_counts: tuple[int]) -> tuple[int] | None:
+    rank_counts = sorted(rank_counts, key=lambda x: x[1], reverse=True)
+    if len(rank_counts) != 2:
+        return None
+    if rank_counts[0][1] == 3 and rank_counts[1][1] == 2:
+        ranks = tuple(sorted([rank[0] for rank in rank_counts], reverse=True))
+        return ranks
+    return None
+
+def three_of_a_kind(rank_counts: tuple[int]) -> int | None:
+    if len(rank_counts) != 1:
+        return None
+    if rank_counts[0][1] == 3:
+        return rank_counts[0][0]
+    return None
+
+def two_pair(rank_counts: tuple[int]) -> tuple[int] | None:
+    if len(rank_counts) != 2:
+        return None
+    if rank_counts[0][1] == 2 and rank_counts[1][1] == 2:
+        return (rank_counts[0][0], rank_counts[0][1])
+    return None
+
+def one_pair(rank_counts: tuple[int]) -> int | None:
+    if len(rank_counts) != 1:
+        return None
+    if rank_counts[0][1] == 2:
+        return rank_counts[0][0]
+    return None
+
+def get_pairs(ranks: list[int]) -> tuple[int] | None:
+    rank_counts = defaultdict(int)
+    pairs = []
+    for rank in ranks:
+        rank_counts[rank] += 1
+    rank_counts = [(rank, count) for rank, count in rank_counts.items() if count != 1]
+    rank_counts = sorted(rank_counts, key=lambda x: x[0], reverse=True)
+    return rank_counts
+    
 
 class PokerHand:
     def __init__(self, players: list[GamePlayer], button_pos: int, big_blind: int):
@@ -99,6 +246,7 @@ class PokerHand:
         if action == "fold":
             p.in_hand = False
             p.made_decision_this_round = True
+            p.last_action = "FOLD"
 
         elif action == "check":
             # check if already matched, otherwise it's a call
@@ -108,6 +256,8 @@ class PokerHand:
             p.bet += pay
             self.pot += pay
             p.made_decision_this_round = True
+
+            p.last_action = "CHECK" if needed == 0 else "CALL"
 
         elif action == "raise":
             if raise_to is None:
@@ -126,6 +276,8 @@ class PokerHand:
                         other.made_decision_this_round = False
 
             p.made_decision_this_round = True
+
+            p.last_action = f"RAISE {p.bet}"
 
     def betting_round_complete(self) -> bool:
         """
@@ -169,6 +321,7 @@ class PokerHand:
         for p in self.players:
             p.bet = 0
             p.made_decision_this_round = False
+            p.last_action = None
 
         self.current_bet = 0  # no one has bet yet this street
 
@@ -199,6 +352,7 @@ class PokerHand:
             p.in_hand = True
             p.made_decision_this_round = False
             p.cards = ("??", "??")
+            p.last_action = None
 
     def post_blinds(self):
         """
@@ -279,7 +433,6 @@ class PokerHand:
         self.in_showdown = True
         for i in range(self.n_seats):
             self.players[i].cards_hidden = False
-
 
 class PokerGame:
     def __init__(self, n_seats: int, big_blind_amount: int):
@@ -424,6 +577,7 @@ class PokerGameUI(tk.Tk):
             up.cards = gp.cards
             up.name = gp.name
             up.cards_hidden = gp.cards_hidden
+            up.last_action = gp.last_action
 
             if self.game.hand.in_showdown == False:
                 # Only you see your cards
@@ -595,24 +749,40 @@ class PokerGameUI(tk.Tk):
             c.create_text(sx, sy-10, text=p.name, fill="white", font=("Helvetica", 12, "bold"))
             c.create_text(sx, sy+12, text=f"Stack: {p.stack}", fill="#cfcfcf", font=("Helvetica", 11))
 
-            # Bets pinned to top-left of seat tag (never overlaps cards)
-            if p.bet > 0:
-                chip_r = 14
-                chip_x = x1 + chip_r + 6
-                chip_y = y1 - chip_r - 6
+            # --- Action/bet badge pinned to top-left of seat tag (outside the box) ---
+            badge_r = 14
+            badge_x = x1 + badge_r + 6
+            badge_y = y1 - badge_r - 6
 
+            if (p.last_action or "").upper() == "CHECK":
+                # CHECK badge (same style as chip, different color)
                 c.create_oval(
-                    chip_x - chip_r, chip_y - chip_r,
-                    chip_x + chip_r, chip_y + chip_r,
-                    fill="#d4af37", outline="#8c6b1f", width=2
+                    badge_x - badge_r, badge_y - badge_r,
+                    badge_x + badge_r, badge_y + badge_r,
+                    fill="#67c8ff", outline="#1b6a8d", width=2
+                )
+                c.create_text(
+                    badge_x, badge_y,
+                    text="CHK",   # or "CHK" if you want it cleaner
+                    fill="black",
+                    font=("Helvetica", 7, "bold")  # small enough to fit in the circle
                 )
 
+            elif p.bet > 0:
+                # Bet chip (your original)
+                c.create_oval(
+                    badge_x - badge_r, badge_y - badge_r,
+                    badge_x + badge_r, badge_y + badge_r,
+                    fill="#d4af37", outline="#8c6b1f", width=2
+                )
                 c.create_text(
-                    chip_x, chip_y,
+                    badge_x, badge_y,
                     text=str(p.bet),
                     fill="black",
                     font=("Helvetica", 9, "bold")
                 )
+
+
 
 
             # Hold cards near seat (UPDATED: nicer faces/backs)
@@ -641,7 +811,7 @@ class PokerGameUI(tk.Tk):
             self.pause_game()
 
     def ui_raise(self):
-        if self.game.hand is None:
+        if self.game.hand is None or self.game.hand.in_showdown == True:
             return
         hand = self.game.hand
         current_player_idx = hand.current_player_idx
@@ -659,7 +829,7 @@ class PokerGameUI(tk.Tk):
         self.after_action()
 
     def ui_check_call(self):
-        if self.game.hand is None:
+        if self.game.hand is None or self.game.hand.in_showdown == True:
             return
         current_player_idx = self.game.hand.current_player_idx
         self.game.hand.apply_action(current_player_idx, "check")
@@ -667,7 +837,7 @@ class PokerGameUI(tk.Tk):
         self.after_action()
 
     def ui_fold(self):
-        if self.game.hand is None:
+        if self.game.hand is None or self.game.hand.in_showdown == True:
             return
         current_player_idx = self.game.hand.current_player_idx
         self.game.hand.apply_action(current_player_idx, "fold")
@@ -716,5 +886,14 @@ class PokerGameUI(tk.Tk):
         self.paused = False
         self.start_pause_btn.config(text="Pause Game")
 
-
-PokerGameUI(n_seats=8).mainloop()
+print(score_five(parse_cards(["Ah", "Kh", "Qh", "Jh", "Th"])))
+print(score_five(parse_cards(["Th", "9h", "8h", "7h", "6h"])))
+print(score_five(parse_cards(["Th", "Ts", "Tc", "Td", "9s"])))
+print(score_five(parse_cards(["Th", "Ts", "Tc", "9h", "9s"])))
+print(score_five(parse_cards(["Th", "3h", "5h", "8h", "7h"])))
+print(score_five(parse_cards(["Th", "9s", "8c", "7h", "6s"])))
+print(score_five(parse_cards(["Th", "Ts", "Tc", "9h", "8s"])))
+print(score_five(parse_cards(["Th", "Ts", "5c", "9h", "9s"])))
+print(score_five(parse_cards(["Th", "Ts", "6c", "9h", "4s"])))
+print(score_five(parse_cards(["Th", "8s", "6c", "4h", "2s"])))
+#PokerGameUI(n_seats=8).mainloop()
