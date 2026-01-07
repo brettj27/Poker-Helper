@@ -51,6 +51,8 @@ class PokerHand:
         self.players = players
         self.n_seats = len(players)
 
+        self.in_showdown = False # used to show all cards during showdown
+
         # Assigns blinds based on button position
         self.button_pos = button_pos
         self.bb_amount = big_blind
@@ -77,6 +79,17 @@ class PokerHand:
         self.deal_cards()
 
     def apply_action(self, seat_idx: int, action: str, raise_to: int | None = None):
+        """
+        This function applies the fold, check/call, or raise action 
+        to the player at the specifed seat position
+        INPUTS:
+            - seat_idx is the index of the person you wish to apply the action to
+            - action is a string containing either "fold", "check", or "raise", indiciating
+            which action to apply to the player at seat_idx
+            - raise_to is an integer representing how much to raise (can be 'None')
+        OUTPUTS:
+            - none
+        """
         p = self.players[seat_idx]
         if not p.in_hand:
             return
@@ -114,23 +127,22 @@ class PokerHand:
 
             p.made_decision_this_round = True
 
-    def run_betting_round(self):
-        while True:
-            idx = next_player_to_act(
-                self.players,
-                self.current_player_idx,
-                self.current_bet
-            )
-
-            if idx is None:
-                break  # betting round complete
-
-            self.current_player_idx = idx
-            player = self.players[idx]
-
-            self.prompt_player_action(player)
-
     def betting_round_complete(self) -> bool:
+        """
+        This function returns True or False whether 
+        the betting round is complete or not 
+        
+        - If there is only one player in the hand, returns true
+        - If everybody has acted atleast once and all non-folded players
+        have the same bet, returns true
+        Otherwise: FALSE
+
+        INPUTS:
+            - none
+        OUTPUTS:
+            - True or False representing whether the 
+            betting round is complete or not
+        """
         in_hand_players = [p for p in self.players if p.in_hand]
         if len(in_hand_players) <= 1:
             return True  # hand effectively over / no betting needed
@@ -140,6 +152,18 @@ class PokerHand:
         return all_acted and bets_equal
 
     def start_new_betting_round(self):
+        """
+        This functons starts a new betting round by
+
+        1. Resets everyones individual bets
+        2. Resetting the T/F var representing whether everyone has made
+        a decision
+
+        INPUTS:
+            - none
+        OUTPUTS:
+            - none
+        """
         # everyone’s bet is now "in the pot" (you already added to pot as chips went in),
         # so for UI cleanliness, reset displayed street bets to 0.
         for p in self.players:
@@ -148,25 +172,15 @@ class PokerHand:
 
         self.current_bet = 0  # no one has bet yet this street
 
-
-
-    def next_player_to_act(self, players, start_idx, current_bet):
-        n = len(players)
-        for i in range(n):
-            idx = (start_idx + i) % n
-            p = players[idx]
-            if needs_action(p, current_bet):
-                return idx
-        return None  # betting round complete
-
-    def needs_action(self, player: GamePlayer, current_bet: int) -> bool:
-        # Returns T or F whether a player needs to act or not
-        return (
-            player.in_hand
-            and (not player.made_decision_this_round or player.bet < current_bet)
-        )
-
     def advance_to_next_in_hand(self):
+        """
+        This function advances to the next 
+        non-folded player in the hand
+        INPUTS:
+            - none
+        OUTPUTS:
+            - none
+        """
         for _ in range(self.n_seats):
             self.current_player_idx = (self.current_player_idx + 1) % self.n_seats
             if self.players[self.current_player_idx].in_hand:
@@ -253,6 +267,18 @@ class PokerHand:
         """
         # optional burn: self.deck.pop()
         self.board.append(card_to_str(self.deck.pop()))
+
+    def initiate_showdown(self):
+        """
+        This function initiates the showdown
+        INPUTS:
+            - none
+        OUTPUTS:
+            - none
+        """
+        self.in_showdown = True
+        for i in range(self.n_seats):
+            self.players[i].cards_hidden = False
 
 
 class PokerGame:
@@ -342,11 +368,20 @@ class PokerGameUI(tk.Tk):
         self.redraw()
 
     def after_action(self):
+        """
+        This function is executed after any player makes an action
+        such as fold, check/call, raise
+        This functions then initiates the next betting round if necessary
+        INPUTS:
+            - none
+        OUTPUTS:
+            - none
+        """
         hand = self.game.hand
         if hand is None:
             return
 
-        # If betting round complete, advance the street
+        # If betting round complete, initiate next round
         if hand.betting_round_complete():
             # Super simple street progression for now:
             if len(hand.board) == 0:
@@ -357,7 +392,7 @@ class PokerGameUI(tk.Tk):
                 hand.deal_river()
             else:
                 # River betting complete -> you'd go to showdown later
-                pass
+                hand.initiate_showdown()
 
             hand.start_new_betting_round()
 
@@ -388,13 +423,15 @@ class PokerGameUI(tk.Tk):
             up.in_hand = gp.in_hand
             up.cards = gp.cards
             up.name = gp.name
+            up.cards_hidden = gp.cards_hidden
 
-            # Only you see your cards
-            up.cards_hidden = (i != 0)
+            if self.game.hand.in_showdown == False:
+                # Only you see your cards
+                up.cards_hidden = (i != 0)
 
         self.redraw()
 
-    # -=x=- Helper Functions for UI -=x=-
+    # -=x=- Helper Functions for UI (Don't Modify) -=x=-
     def seat_positions(self, cx, cy, rx, ry):
         """
         Returns list of (x,y,angle) points around an ellipse.
@@ -410,7 +447,6 @@ class PokerGameUI(tk.Tk):
         return pts
 
     # -=x=- Drawing (Don't Modify) -=x=-
-    # --- ADD THESE INSIDE PokerGameUI (anywhere in the class, above redraw is fine) ---
 
     SUIT_SYMBOL = {"c": "♣", "d": "♦", "h": "♥", "s": "♠"}
     SUIT_COLOR  = {"c": "#111111", "s": "#111111", "d": "#c1121f", "h": "#c1121f"}
@@ -507,9 +543,6 @@ class PokerGameUI(tk.Tk):
         c.create_oval(x1+w*0.35, y1+h*0.35, x1+w*0.65, y1+h*0.65, outline="#ffffff", width=2)
         c.create_text(x1+w/2, y1+h/2, text="★", fill="#ffffff",
                     font=("Helvetica", max(12, int(h*0.25)), "bold"))
-
-
-    # --- REPLACE YOUR redraw() WITH THIS (ONLY CARD DRAWING CHANGED) ---
 
     def redraw(self):
         c = self.canvas
@@ -660,9 +693,6 @@ class PokerGameUI(tk.Tk):
         self.start_pause_btn.config(text="Start Game")
 
         self.redraw()
-
-
-
 
     # Start / Resume / Pause Game Functionality
 
