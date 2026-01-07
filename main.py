@@ -73,7 +73,7 @@ class PokerHand:
 
         self.reset_players_for_hand()
         self.post_blinds()
-        self.current_bet = big_blind
+        self.current_bet = max(p.bet for p in self.players) # in case big-blind is all-in for less
         self.deal_cards()
 
     def apply_action(self, seat_idx: int, action: str, raise_to: int | None = None):
@@ -93,6 +93,7 @@ class PokerHand:
             pay = min(needed, p.stack)
             p.stack -= pay
             p.bet += pay
+            self.pot += pay
             p.made_decision_this_round = True
 
         elif action == "raise":
@@ -103,6 +104,7 @@ class PokerHand:
             pay = min(needed, p.stack)
             p.stack -= pay
             p.bet += pay
+            self.pot += pay
 
             if p.bet > self.current_bet:
                 self.current_bet = p.bet
@@ -111,7 +113,6 @@ class PokerHand:
                         other.made_decision_this_round = False
 
             p.made_decision_this_round = True
-
 
     def run_betting_round(self):
         while True:
@@ -129,6 +130,26 @@ class PokerHand:
 
             self.prompt_player_action(player)
 
+    def betting_round_complete(self) -> bool:
+        in_hand_players = [p for p in self.players if p.in_hand]
+        if len(in_hand_players) <= 1:
+            return True  # hand effectively over / no betting needed
+
+        all_acted = all(p.made_decision_this_round for p in in_hand_players)
+        bets_equal = len({p.bet for p in in_hand_players}) <= 1
+        return all_acted and bets_equal
+
+    def start_new_betting_round(self):
+        # everyone’s bet is now "in the pot" (you already added to pot as chips went in),
+        # so for UI cleanliness, reset displayed street bets to 0.
+        for p in self.players:
+            p.bet = 0
+            p.made_decision_this_round = False
+
+        self.current_bet = 0  # no one has bet yet this street
+
+
+
     def next_player_to_act(self, players, start_idx, current_bet):
         n = len(players)
         for i in range(n):
@@ -145,6 +166,12 @@ class PokerHand:
             and (not player.made_decision_this_round or player.bet < current_bet)
         )
 
+    def advance_to_next_in_hand(self):
+        for _ in range(self.n_seats):
+            self.current_player_idx = (self.current_player_idx + 1) % self.n_seats
+            if self.players[self.current_player_idx].in_hand:
+                return
+
     def reset_players_for_hand(self):
         """
         This function resets player's bet, hand activity state, and cards to prepare for a new hand
@@ -156,6 +183,7 @@ class PokerHand:
         for p in self.players:
             p.bet = 0
             p.in_hand = True
+            p.made_decision_this_round = False
             p.cards = ("??", "??")
 
     def post_blinds(self):
@@ -307,10 +335,34 @@ class PokerGameUI(tk.Tk):
         )
         self.start_pause_btn.pack(side="left", padx=6)
         tk.Button(bar, text="Raise", command=self.ui_raise).pack(side="right", padx=6)
-        tk.Button(bar, text="Check", command=self.ui_check).pack(side="right", padx=6)
+        tk.Button(bar, text="Check/Call", command=self.ui_check_call).pack(side="right", padx=6)
         tk.Button(bar, text="Fold", command=self.ui_fold).pack(side="right", padx=6)
+        tk.Button(bar, text="Reset Game", command=self.reset_game).pack(side="right", padx=6)
 
         self.redraw()
+
+    def after_action(self):
+        hand = self.game.hand
+        if hand is None:
+            return
+
+        # If betting round complete, advance the street
+        if hand.betting_round_complete():
+            # Super simple street progression for now:
+            if len(hand.board) == 0:
+                hand.deal_flop()
+            elif len(hand.board) == 3:
+                hand.deal_turn()
+            elif len(hand.board) == 4:
+                hand.deal_river()
+            else:
+                # River betting complete -> you'd go to showdown later
+                pass
+
+            hand.start_new_betting_round()
+
+        self.sync_from_game()
+
 
     def sync_from_game(self):
         """
@@ -358,6 +410,107 @@ class PokerGameUI(tk.Tk):
         return pts
 
     # -=x=- Drawing (Don't Modify) -=x=-
+    # --- ADD THESE INSIDE PokerGameUI (anywhere in the class, above redraw is fine) ---
+
+    SUIT_SYMBOL = {"c": "♣", "d": "♦", "h": "♥", "s": "♠"}
+    SUIT_COLOR  = {"c": "#111111", "s": "#111111", "d": "#c1121f", "h": "#c1121f"}
+
+    def parse_card(self, code: str):
+        """'Ah' -> ('A','h'). Returns ('?','?') for unknowns."""
+        if not code or len(code) < 2 or code == "??":
+            return "?", "?"
+        return code[0], code[1]
+
+    def rounded_rect(self, x1, y1, x2, y2, r=10, **kwargs):
+        """Draw a rounded rectangle on a Tk canvas using a smoothed polygon."""
+        c = self.canvas
+        r = min(r, abs(x2-x1)/2, abs(y2-y1)/2)
+        points = [
+            x1+r, y1,
+            x2-r, y1,
+            x2, y1,
+            x2, y1+r,
+            x2, y2-r,
+            x2, y2,
+            x2-r, y2,
+            x1+r, y2,
+            x1, y2,
+            x1, y2-r,
+            x1, y1+r,
+            x1, y1
+        ]
+        return c.create_polygon(points, smooth=True, splinesteps=20, **kwargs)
+
+    def draw_card_front(self, x1, y1, w, h, code: str):
+        """Draw a nicer playing card face (UI only)."""
+        c = self.canvas
+        rank, suit = self.parse_card(code)
+
+        # Card base
+        self.rounded_rect(x1, y1, x1+w, y1+h, r=10, fill="#ffffff", outline="#222222", width=2)
+
+        # Unknown card
+        if rank == "?" or suit == "?":
+            c.create_text(x1+w/2, y1+h/2, text="?", fill="#111", font=("Helvetica", int(h*0.35), "bold"))
+            return
+
+        sym = self.SUIT_SYMBOL.get(suit, "?")
+        col = self.SUIT_COLOR.get(suit, "#111111")
+
+        # Corner indices
+        corner_font = ("Helvetica", max(10, int(h*0.22)), "bold")
+        c.create_text(x1+w*0.18, y1+h*0.16, text=rank, fill=col, font=corner_font)
+        c.create_text(x1+w*0.18, y1+h*0.33, text=sym,  fill=col, font=corner_font)
+
+        c.create_text(x1+w*0.82, y1+h*0.84, text=rank, fill=col, font=corner_font)
+        c.create_text(x1+w*0.82, y1+h*0.67, text=sym,  fill=col, font=corner_font)
+
+        # Center pip
+        center_font = ("Helvetica", max(14, int(h*0.45)), "bold")
+        c.create_text(x1+w/2, y1+h/2, text=sym, fill=col, font=center_font)
+
+    def draw_card_back(self, x1, y1, w, h):
+        """Draw a Bicycle-ish patterned back (UI only, no images), without spillover."""
+        c = self.canvas
+
+        # Outer card
+        self.rounded_rect(x1, y1, x1+w, y1+h, r=10, fill="#0b2a6f", outline="#111111", width=2)
+
+        # Inner border
+        pad = max(3, int(min(w, h) * 0.08))
+        ix1, iy1 = x1 + pad, y1 + pad
+        ix2, iy2 = x1 + w - pad, y1 + h - pad
+        self.rounded_rect(ix1, iy1, ix2, iy2, r=8, fill="#0b2a6f", outline="#ffffff", width=2)
+
+        # --- Pattern: tiny diagonal stitches (stays inside the inner rectangle) ---
+        step = max(6, int(min(w, h) * 0.12))
+        seg = max(6, step)  # segment length
+
+        y = iy1 + 2
+        while y < iy2 - 2:
+            x = ix1 + 2
+            while x < ix2 - 2:
+                # down-right stitch
+                x_end = min(x + seg, ix2 - 2)
+                y_end = min(y + seg, iy2 - 2)
+                c.create_line(x, y, x_end, y_end, fill="#ffffff", width=1, stipple="gray50")
+
+                # down-left stitch (adds the crosshatch look)
+                x2s = min(x + seg, ix2 - 2)
+                y2s = max(y - seg, iy1 + 2)
+                c.create_line(x, y, x2s, y2s, fill="#ffffff", width=1, stipple="gray50")
+
+                x += step
+            y += step
+
+        # Center emblem
+        c.create_oval(x1+w*0.35, y1+h*0.35, x1+w*0.65, y1+h*0.65, outline="#ffffff", width=2)
+        c.create_text(x1+w/2, y1+h/2, text="★", fill="#ffffff",
+                    font=("Helvetica", max(12, int(h*0.25)), "bold"))
+
+
+    # --- REPLACE YOUR redraw() WITH THIS (ONLY CARD DRAWING CHANGED) ---
+
     def redraw(self):
         c = self.canvas
         c.delete("all")
@@ -371,23 +524,25 @@ class PokerGameUI(tk.Tk):
 
         # Draw table (oval + inner felt)
         c.create_oval(cx-table_rx*1.15, cy-table_ry*1.15, cx+table_rx*1.15, cy+table_ry*1.15,
-                      fill="#2a2a2a", outline="")
+                    fill="#2a2a2a", outline="")
         c.create_oval(cx-table_rx, cy-table_ry, cx+table_rx, cy+table_ry,
-                      fill="#1e7a4a", outline="")
+                    fill="#1e7a4a", outline="")
 
         # Pot
         c.create_text(cx, cy - table_ry*0.65, text=f"Pot: {self.pot}",
-                      fill="white", font=("Helvetica", 18, "bold"))
+                    fill="white", font=("Helvetica", 18, "bold"))
 
-        # Community cards (simple boxes)
-        card_w, card_h, gap = 50, 70, 12
+        # Community cards (UPDATED: nicer faces/backs)
+        card_w, card_h, gap = 60, 84, 12
         start_x = cx - (5*card_w + 4*gap)/2
         y_cards = cy - card_h/2
         for i, card in enumerate(self.community):
             x1 = start_x + i*(card_w+gap)
             y1 = y_cards
-            c.create_rectangle(x1, y1, x1+card_w, y1+card_h, fill="#0f0f0f", outline="#333")
-            c.create_text(x1+card_w/2, y1+card_h/2, text=card, fill="#ddd", font=("Consolas", 14, "bold"))
+            if card == "??":
+                self.draw_card_back(x1, y1, card_w, card_h)
+            else:
+                self.draw_card_front(x1, y1, card_w, card_h, card)
 
         # Seats around table
         seat_rx, seat_ry = w * 0.43, h * 0.32
@@ -407,34 +562,40 @@ class PokerGameUI(tk.Tk):
             c.create_text(sx, sy-10, text=p.name, fill="white", font=("Helvetica", 12, "bold"))
             c.create_text(sx, sy+12, text=f"Stack: {p.stack}", fill="#cfcfcf", font=("Helvetica", 11))
 
-            # Bets "in front" of the seat (toward center)
-            # Vector from seat -> center, step inward
-            dx, dy = (cx - sx), (cy - sy)
-            mag = (dx*dx + dy*dy) ** 0.5 or 1.0
-            ux, uy = dx/mag, dy/mag
-            bet_x, bet_y = sx + ux*65, sy + uy*65
-
+            # Bets pinned to top-left of seat tag (never overlaps cards)
             if p.bet > 0:
-                c.create_oval(bet_x-18, bet_y-18, bet_x+18, bet_y+18, fill="#d4af37", outline="")
-                c.create_text(bet_x, bet_y, text=str(p.bet), fill="black", font=("Helvetica", 10, "bold"))
+                chip_r = 14
+                chip_x = x1 + chip_r + 6
+                chip_y = y1 - chip_r - 6
 
-            # Hold cards near seat (hidden backs)
-            card_back_w, card_back_h = 28, 40
-            cards_x, cards_y = sx, sy - 55
+                c.create_oval(
+                    chip_x - chip_r, chip_y - chip_r,
+                    chip_x + chip_r, chip_y + chip_r,
+                    fill="#d4af37", outline="#8c6b1f", width=2
+                )
+
+                c.create_text(
+                    chip_x, chip_y,
+                    text=str(p.bet),
+                    fill="black",
+                    font=("Helvetica", 9, "bold")
+                )
+
+
+            # Hold cards near seat (UPDATED: nicer faces/backs)
             if p.in_hand:
+                hold_w, hold_h = 46, 64
+                cards_x, cards_y = sx, sy - 62
                 for k in range(2):
-                    offset = (k - 0.5) * 18
-                    x = cards_x + offset
-                    c.create_rectangle(
-                        x-card_back_w/2, cards_y-card_back_h/2,
-                        x+card_back_w/2, cards_y+card_back_h/2,
-                        fill="#0b2a6f" if p.cards_hidden else "#ffffff",
-                        outline="#222"
-                    )
-                    card_text = "🂠" if p.cards_hidden else p.cards[k]
-                    c.create_text(x, cards_y, text=card_text,
-                                  fill="white" if p.cards_hidden else "black",
-                                  font=("Helvetica", 12))
+                    offset = (k - 0.5) * (hold_w * 0.55)
+                    hx1 = (cards_x + offset) - hold_w/2
+                    hy1 = cards_y - hold_h/2
+
+                    if p.cards_hidden:
+                        self.draw_card_back(hx1, hy1, hold_w, hold_h)
+                    else:
+                        self.draw_card_front(hx1, hy1, hold_w, hold_h, p.cards[k])
+
 
     # -=x=- Button Functionality -=x=-
     def toggle_game(self):
@@ -461,24 +622,46 @@ class PokerGameUI(tk.Tk):
             return
 
         hand.apply_action(current_player_idx, "raise", raise_to=raise_to)
-        hand.current_player_idx = (current_player_idx + 1) % self.n_seats
-        self.sync_from_game()
+        hand.advance_to_next_in_hand()
+        self.after_action()
 
-    def ui_check(self):
+    def ui_check_call(self):
         if self.game.hand is None:
             return
         current_player_idx = self.game.hand.current_player_idx
         self.game.hand.apply_action(current_player_idx, "check")
-        self.game.hand.current_player_idx = (current_player_idx + 1) % self.n_seats
-        self.sync_from_game()
+        self.game.hand.advance_to_next_in_hand()
+        self.after_action()
 
     def ui_fold(self):
         if self.game.hand is None:
             return
         current_player_idx = self.game.hand.current_player_idx
         self.game.hand.apply_action(current_player_idx, "fold")
-        self.game.hand.current_player_idx = (current_player_idx + 1) % self.n_seats
-        self.sync_from_game()
+        self.game.hand.advance_to_next_in_hand()
+        self.after_action()
+
+    def reset_game(self):
+        # reset game object state
+        self.game = PokerGame(n_seats=self.n_seats, big_blind_amount=self.game.big_blind_amount)
+
+        # reset UI state to initial
+        self.players = [UIPlayer(name="Me (Seat 1)", stack=1500, bet=0, in_hand=True, cards_hidden=False)]
+        self.players += [
+            UIPlayer(name=f"Seat {i+1}", stack=1500, bet=0, in_hand=True, cards_hidden=True)
+            for i in range(1, self.n_seats)
+        ]
+
+        self.pot = 0
+        self.community = ["??"] * 5
+
+        self.game_running = False
+        self.paused = False
+        self.start_pause_btn.config(text="Start Game")
+
+        self.redraw()
+
+
 
 
     # Start / Resume / Pause Game Functionality
