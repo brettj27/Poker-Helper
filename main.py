@@ -243,6 +243,10 @@ class PokerHand:
         self.bb_pos = (self.button_pos + 2) % self.n_seats
         self.current_player_idx = (self.bb_pos + 1) % self.n_seats
 
+        for i, p in enumerate(self.players):
+            p.name = f"Seat {i+1}"
+        self.players[0].name = "Seat 1 (Me)"
+
         self.players[self.button_pos].name = f"Seat {self.button_pos + 1} (Button)"
         self.players[self.sb_pos].name = f"Seat {self.sb_pos + 1} (SB)"
         self.players[self.bb_pos].name = f"Seat {self.bb_pos + 1} (BB)"
@@ -381,12 +385,14 @@ class PokerHand:
         OUTPUTS:
             - none
         """
-        for p in self.players:
+        for idx, p in enumerate(self.players):
             p.bet = 0
             p.in_hand = True
             p.made_decision_this_round = False
             p.cards = ("??", "??")
             p.last_action = None
+            p.cards_hidden = (idx != 0)
+            p.show_hand_box = (idx == 0)
 
     def post_blinds(self):
         """
@@ -469,6 +475,56 @@ class PokerHand:
             self.players[i].cards_hidden = False
             self.players[i].show_hand_box = True
         
+        winners = self.winning_seats()
+        if winners:
+            share, rem = divmod(self.pot, len(winners))
+            for idx in winners:
+                self.players[idx].stack += share
+            self.players[winners[0]].stack += rem  # remainder chip
+        self.pot = 0
+        print("Winners: ", winners)
+
+    def best_score_for_player(self, seat_idx: int):
+        """
+        Best 5-card score from player's 2 hole cards + current board.
+        """
+        p = self.players[seat_idx]
+        cards7 = list(p.cards) + list(self.board)
+
+        if len(cards7) < 5 or "??" in cards7:
+            return None
+
+        parsed7 = parse_cards(cards7)
+
+        best = None
+        for combo in combinations(parsed7, 5):
+            sc = score_five(list(combo))   # should return (type, tuple) or None
+            if sc is None:
+                continue
+            if best is None or sc > best:
+                best = sc
+        return best
+
+    def winning_seats(self) -> list[int]:
+        """
+        Returns seat indexes of all winners (ties included).
+        Only considers players still in_hand.
+        """
+        scored = []
+        for i, p in enumerate(self.players):
+            if not p.in_hand:
+                continue
+            sc = self.best_score_for_player(i)
+            if sc is not None:
+                scored.append((i, sc))
+
+        if not scored:
+            return []
+
+        best_score = max(sc for _, sc in scored)
+        return [i for i, sc in scored if sc == best_score]
+
+        
 
 class PokerGame:
     def __init__(self, n_seats: int, big_blind_amount: int):
@@ -509,6 +565,15 @@ class PokerGame:
         self.button_pos = (self.button_pos + 1) % self.n_seats
         self.hand = None
 
+    def start_next_hand(self):
+        # move button
+        self.button_pos = (self.button_pos + 1) % self.n_seats
+
+        # start a brand new hand object
+        self.hand = PokerHand(self.players, self.button_pos, self.big_blind_amount)
+        self.hand_number += 1
+
+
 # -=x=- UI -=x=-
 class PokerGameUI(tk.Tk):
     def __init__(self, n_seats=8):
@@ -518,6 +583,8 @@ class PokerGameUI(tk.Tk):
 
         self.game_running = False
         self.paused = False
+
+        self._next_hand_job = None
 
         self.n_seats = n_seats
 
@@ -548,6 +615,7 @@ class PokerGameUI(tk.Tk):
             text="Start Game",
             command=self.toggle_game
         )
+
         self.start_pause_btn.pack(side="left", padx=6)
         tk.Button(bar, text="Raise", command=self.ui_raise).pack(side="right", padx=6)
         tk.Button(bar, text="Check/Call", command=self.ui_check_call).pack(side="right", padx=6)
@@ -582,9 +650,27 @@ class PokerGameUI(tk.Tk):
             else:
                 # River betting complete -> you'd go to showdown later
                 hand.initiate_showdown()
+                self.sync_from_game()           # update UI immediately so we see cards/hands
+                self.schedule_next_hand(10000)   # wait 7 seconds, then next hand
+                return  
 
             hand.start_new_betting_round()
 
+        self.sync_from_game()
+
+    def schedule_next_hand(self, delay_ms: int = 7000):
+        # prevent double-scheduling if something calls it twice
+        if hasattr(self, "_next_hand_job") and self._next_hand_job is not None:
+            try:
+                self.after_cancel(self._next_hand_job)
+            except Exception:
+                pass
+
+        self._next_hand_job = self.after(delay_ms, self.start_next_hand_now)
+
+    def start_next_hand_now(self):
+        self._next_hand_job = None
+        self.game.start_next_hand()
         self.sync_from_game()
 
 
